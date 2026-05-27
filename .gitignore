@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+temp/
+*.mp4
+*.ykv
+*.kux
+resources/ffmpeg/win64/*.exe
+resources/ffmpeg/win64/*.txt
+!resources/ffmpeg/win64/.gitkeep
+dist/
+build/
+.DS_Store
