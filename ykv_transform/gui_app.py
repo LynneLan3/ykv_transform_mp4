@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sys
+from threading import Event
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractButton,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -24,14 +27,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtCore import QUrl
 
 from ykv_transform.service import JobItem, JobResult, collect_jobs, convert_job, resolve_ffmpeg
+from ykv_transform.service import estimate_job_duration_seconds
 
 STATUS_WAITING = "等待"
 STATUS_RUNNING = "转换中"
 STATUS_SUCCESS = "成功"
 STATUS_FAILED = "失败"
 STATUS_SKIPPED = "跳过"
+STATUS_CANCELLED = "已中断"
+MAX_RECOMMENDED_TOTAL_MINUTES = 120
 
 
 class DropArea(QLabel):
@@ -59,7 +66,7 @@ class DropArea(QLabel):
 
 
 class ConvertWorker(QThread):
-    progress = Signal(int, str, object)
+    progress = Signal(int, str, object, int)
     finished_all = Signal()
 
     def __init__(
@@ -74,20 +81,40 @@ class ConvertWorker(QThread):
         self.mode = mode
         self.force = force
         self._ffmpeg = resolve_ffmpeg()
+        self._cancel_event = Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
 
     def run(self) -> None:
+        total = max(len(self.jobs), 1)
         for index, job in enumerate(self.jobs):
-            self.progress.emit(index, STATUS_RUNNING, None)
+            if self._cancel_event.is_set():
+                self.progress.emit(index, STATUS_CANCELLED, None, int((index / total) * 100))
+                break
+            self.progress.emit(index, STATUS_RUNNING, None, int((index / total) * 100))
+
+            def _on_file_progress(file_percent: int) -> None:
+                total_percent = int(((index + (file_percent / 100.0)) / total) * 100)
+                self.progress.emit(index, STATUS_RUNNING, None, min(99, total_percent))
+
             result = convert_job(
                 job,
                 mode=self.mode,
                 ffmpeg_path=self._ffmpeg,
                 force=self.force,
+                progress_callback=_on_file_progress,
+                cancel_requested=lambda: self._cancel_event.is_set(),
             )
             status = STATUS_SUCCESS if result.success else STATUS_FAILED
             if result.success and result.message.startswith("跳过"):
                 status = STATUS_SKIPPED
-            self.progress.emit(index, status, result)
+            if not result.success and "用户已取消转换" in result.message:
+                status = STATUS_CANCELLED
+            done_percent = int(((index + 1) / total) * 100)
+            self.progress.emit(index, status, result, done_percent)
+            if status == STATUS_CANCELLED:
+                break
         self.finished_all.emit()
 
 
@@ -102,6 +129,9 @@ class MainWindow(QMainWindow):
         self.success_count = 0
         self.failed_count = 0
         self.skipped_count = 0
+        self.output_dirs: list[Path] = []
+        self.current_index = -1
+        self.progress_dialog: QProgressDialog | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -131,25 +161,15 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
-        options = QGroupBox("转换选项")
+        options = QGroupBox("转换说明")
         options_layout = QVBoxLayout(options)
-
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("转换模式:"))
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("点唱机模式 (H.264 + AAC)", "karaoke")
-        self.mode_combo.addItem("快速模式 (无损封装)", "copy")
-        mode_row.addWidget(self.mode_combo)
-        mode_row.addStretch()
-        options_layout.addLayout(mode_row)
-
-        self.force_checkbox = QCheckBox("覆盖已存在的 MP4 文件")
-        options_layout.addWidget(self.force_checkbox)
+        options_layout.addWidget(QLabel("转换模式: 自动按兼容 MP4 输出（H.264 + AAC）"))
+        options_layout.addWidget(QLabel("建议单次总时长不超过 120 分钟，避免处理时间过长。"))
         options_layout.addWidget(QLabel("输出位置: 源文件同目录"))
         layout.addWidget(options)
 
         action_row = QHBoxLayout()
-        self.start_button = QPushButton("开始转换")
+        self.start_button = QPushButton("转换 MP4")
         self.start_button.clicked.connect(self.start_conversion)
         action_row.addWidget(self.start_button)
         action_row.addStretch()
@@ -233,6 +253,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "错误", f"无法找到 FFmpeg:\n{exc}")
             return
+        if not self._confirm_total_duration_limit():
+            return
 
         self.start_button.setEnabled(False)
         self._set_inputs_enabled(False)
@@ -240,20 +262,25 @@ class MainWindow(QMainWindow):
         self.success_count = 0
         self.failed_count = 0
         self.skipped_count = 0
+        self.output_dirs = []
+        self.current_index = -1
         self.progress_bar.setMaximum(len(self.jobs))
         self.progress_bar.setValue(0)
         self.progress_label.setText(f"进度: 0/{len(self.jobs)}")
+        self._create_progress_dialog()
         self.log("开始转换...")
-        mode = self.mode_combo.currentData()
-        self.worker = ConvertWorker(self.jobs, mode, self.force_checkbox.isChecked(), self)
+        self.worker = ConvertWorker(self.jobs, "karaoke", True, self)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_all.connect(self.on_finished)
         self.worker.start()
 
-    def on_progress(self, index: int, status: str, result: JobResult | None) -> None:
+    def on_progress(self, index: int, status: str, result: JobResult | None, total_percent: int) -> None:
         self.table.item(index, 2).setText(status)
+        self._update_progress_dialog(index, total_percent)
         if result is None:
-            self.log(f"正在处理: {self.jobs[index].input_path.name}")
+            if self.current_index != index:
+                self.current_index = index
+                self.log(f"正在处理: {self.jobs[index].input_path.name}")
             return
 
         self.completed_count += 1
@@ -267,30 +294,112 @@ class MainWindow(QMainWindow):
                 self.skipped_count += 1
             else:
                 self.success_count += 1
+            if result.output_path is not None:
+                output_dir = result.output_path.parent
+                if output_dir not in self.output_dirs:
+                    self.output_dirs.append(output_dir)
             self.log(result.message)
             if result.compatibility_hint:
                 self.log(result.compatibility_hint)
         else:
             self.failed_count += 1
             self.log(result.message)
+        if status == STATUS_CANCELLED:
+            self.log("用户已中断转换。")
 
     def on_finished(self) -> None:
         self.start_button.setEnabled(True)
         self._set_inputs_enabled(True)
+        self._close_progress_dialog()
         self.log("全部任务完成。")
         summary = (
             f"成功 {self.success_count} 个，跳过 {self.skipped_count} 个，失败 {self.failed_count} 个。"
         )
         self.log(f"结果汇总: {summary}")
-        if self.failed_count > 0:
-            QMessageBox.warning(self, "转换完成（有失败）", f"{summary}\n请查看日志中的失败原因。")
-        else:
-            QMessageBox.information(self, "转换完成", summary)
+        self._show_completion_dialog(summary)
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
         self.drop_area.setEnabled(enabled)
-        self.mode_combo.setEnabled(enabled)
-        self.force_checkbox.setEnabled(enabled)
+        self.start_button.setEnabled(enabled)
+
+    def _create_progress_dialog(self) -> None:
+        dialog = QProgressDialog("准备开始转换...", "中断转换", 0, 100, self)
+        dialog.setWindowTitle("正在转换")
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.canceled.connect(self._cancel_conversion)
+        dialog.show()
+        self.progress_dialog = dialog
+
+    def _update_progress_dialog(self, index: int, percent: int) -> None:
+        if self.progress_dialog is None:
+            return
+        safe_percent = max(0, min(100, percent))
+        filename = self.jobs[index].input_path.name if 0 <= index < len(self.jobs) else ""
+        self.progress_dialog.setLabelText(f"正在转换: {filename}\n进度: {safe_percent}%")
+        self.progress_dialog.setValue(safe_percent)
+
+    def _close_progress_dialog(self) -> None:
+        if self.progress_dialog is None:
+            return
+        self.progress_dialog.setValue(100)
+        self.progress_dialog.close()
+        self.progress_dialog = None
+
+    def _cancel_conversion(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.log("收到中断请求，正在停止转换...")
+            self.worker.request_cancel()
+
+    def _show_completion_dialog(self, summary: str) -> None:
+        box = QMessageBox(self)
+        title = "转换完成" if self.failed_count == 0 else "转换完成（有失败）"
+        detail = summary if self.failed_count == 0 else f"{summary}\n请查看日志中的失败原因。"
+        box.setWindowTitle(title)
+        box.setText(detail)
+        box.setIcon(
+            QMessageBox.Icon.Information if self.failed_count == 0 else QMessageBox.Icon.Warning
+        )
+        open_btn: QAbstractButton | None = None
+        if self.output_dirs:
+            open_btn = box.addButton("打开文件夹", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+
+        if open_btn is not None and box.clickedButton() is open_btn:
+            folder = self.output_dirs[0]
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _confirm_total_duration_limit(self) -> bool:
+        ffmpeg = resolve_ffmpeg()
+        total_seconds = 0.0
+        unknown_count = 0
+        for job in self.jobs:
+            dur = estimate_job_duration_seconds(job, ffmpeg_path=ffmpeg)
+            if dur is None:
+                unknown_count += 1
+                continue
+            total_seconds += dur
+
+        total_minutes = int(total_seconds / 60)
+        if total_minutes <= MAX_RECOMMENDED_TOTAL_MINUTES and unknown_count == 0:
+            return True
+
+        msg = (
+            f"本次任务估算总时长约 {total_minutes} 分钟"
+            if total_seconds > 0
+            else "无法准确估算本次任务总时长"
+        )
+        if unknown_count > 0:
+            msg += f"\n有 {unknown_count} 个文件无法预估时长。"
+        msg += (
+            f"\n建议单次不超过 {MAX_RECOMMENDED_TOTAL_MINUTES} 分钟。"
+            "\n是否仍继续转换？"
+        )
+        choice = QMessageBox.question(self, "时长提醒", msg)
+        return choice == QMessageBox.StandardButton.Yes
 
 
 def run_gui() -> int:

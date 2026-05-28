@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+import subprocess
 
-from ykv_transform.convert import ConvertError, find_ffmpeg, merge_segments
+from ykv_transform.convert import ConvertError, find_ffmpeg, find_ffprobe, merge_segments
 from ykv_transform.resources import SUPPORTED_EXTENSIONS
 from ykv_transform.unpack import UnpackError, unpack_ykv
 
@@ -101,6 +104,8 @@ def convert_job(
     ffmpeg_path: str | None = None,
     keep_temp: bool = False,
     force: bool = False,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> JobResult:
     if item.output_path.exists() and not force:
         return JobResult(
@@ -115,14 +120,24 @@ def convert_job(
     temp_dir = Path(temp_dir_obj.name)
 
     try:
+        if progress_callback is not None:
+            progress_callback(1)
         unpack_result = unpack_ykv(item.input_path, temp_dir)
+        if progress_callback is not None:
+            progress_callback(15)
         probe = merge_segments(
             unpack_result.segments,
             item.output_path,
             mode=mode,
             ffmpeg_path=ffmpeg_path or resolve_ffmpeg(),
             temp_dir=temp_dir,
+            progress_callback=lambda p: progress_callback(min(95, 15 + int(p * 0.8)))
+            if progress_callback is not None
+            else None,
+            cancel_requested=cancel_requested,
         )
+        if progress_callback is not None:
+            progress_callback(100)
 
         return JobResult(
             input_path=item.input_path,
@@ -187,3 +202,39 @@ def run_batch(
             )
         )
     return summary
+
+
+def estimate_job_duration_seconds(item: JobItem, ffmpeg_path: str | None = None) -> float | None:
+    temp_dir_obj = tempfile.TemporaryDirectory(prefix="ykv_transform_estimate_")
+    temp_dir = Path(temp_dir_obj.name)
+    try:
+        unpack_result = unpack_ykv(item.input_path, temp_dir)
+        ffprobe = find_ffprobe(ffmpeg_path or resolve_ffmpeg())
+        total = 0.0
+        for seg in unpack_result.segments:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(seg),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            try:
+                total += float((result.stdout or "").strip())
+            except ValueError:
+                return None
+        return total if total > 0 else None
+    except Exception:
+        return None
+    finally:
+        temp_dir_obj.cleanup()

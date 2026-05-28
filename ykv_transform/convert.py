@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+import time
 from pathlib import Path
 
 from ykv_transform.resources import bundled_ffmpeg, bundled_ffprobe
@@ -163,6 +165,91 @@ def _build_karaoke_filter_args(
     return args
 
 
+def _estimate_total_duration_seconds(segments: list[Path], ffprobe_path: str) -> float | None:
+    total = 0.0
+    for segment in segments:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(segment),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            **_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            duration = float((result.stdout or "").strip())
+        except ValueError:
+            return None
+        if duration <= 0:
+            return None
+        total += duration
+    return total if total > 0 else None
+
+
+def _run_ffmpeg_with_progress(
+    args: list[str],
+    duration_seconds: float | None,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> tuple[int, str]:
+    progress_args = args[:1] + ["-progress", "pipe:1", "-nostats"] + args[1:]
+    process = subprocess.Popen(
+        progress_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **_subprocess_kwargs(),
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    total_us = max((duration_seconds or 0.0) * 1_000_000.0, 1.0)
+    last_percent = -1
+    while True:
+        if cancel_requested is not None and cancel_requested():
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+            return 255, "用户已取消转换"
+
+        line = process.stdout.readline()
+        if line == "":
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+            continue
+        line = line.strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key == "out_time_ms" and duration_seconds is not None:
+            try:
+                out_us = int(value)
+            except ValueError:
+                continue
+            percent = int(max(0.0, min(99.0, (out_us / total_us) * 100.0)))
+            if percent > last_percent:
+                last_percent = percent
+                progress_callback(percent)
+
+    stderr_text = process.stderr.read().strip()
+    process.wait()
+    return process.returncode, stderr_text
+
+
 def probe_output(output_path: Path, ffprobe_path: str | None = None) -> dict:
     ffprobe = ffprobe_path or find_ffprobe()
     result = subprocess.run(
@@ -200,6 +287,8 @@ def merge_segments(
     mode: str = "copy",
     ffmpeg_path: str | None = None,
     temp_dir: Path | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict:
     if mode not in SUPPORTED_MODES:
         raise ConvertError(f"不支持的输出模式: {mode}")
@@ -218,18 +307,24 @@ def merge_segments(
         concat_list = work_dir / "concat_list.txt"
         _write_concat_list(segments, concat_list)
         args = _build_ffmpeg_args(ffmpeg, concat_list, output_path, mode)
-    result = subprocess.run(
+    duration_seconds = _estimate_total_duration_seconds(segments, ffprobe)
+    if progress_callback is not None:
+        progress_callback(5)
+    returncode, ffmpeg_message = _run_ffmpeg_with_progress(
         args,
-        capture_output=True,
-        text=True,
-        check=False,
-        **_subprocess_kwargs(),
+        duration_seconds=duration_seconds,
+        progress_callback=progress_callback,
+        cancel_requested=cancel_requested,
     )
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "FFmpeg 合并失败"
+    if progress_callback is not None:
+        progress_callback(95)
+    if returncode != 0:
+        message = ffmpeg_message or "FFmpeg 合并失败"
         raise ConvertError(message)
 
     probe = probe_output(output_path, ffprobe)
+    if progress_callback is not None:
+        progress_callback(100)
     if not probe["has_video"]:
         raise ConvertError("输出文件缺少视频流")
     if not probe["has_audio"]:
