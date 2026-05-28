@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QUrl
 
 from ykv_transform.service import JobItem, JobResult, collect_jobs, convert_job, resolve_ffmpeg
-from ykv_transform.service import estimate_job_duration_seconds
 
 STATUS_WAITING = "等待"
 STATUS_RUNNING = "转换中"
@@ -38,7 +37,6 @@ STATUS_SUCCESS = "成功"
 STATUS_FAILED = "失败"
 STATUS_SKIPPED = "跳过"
 STATUS_CANCELLED = "已中断"
-MAX_RECOMMENDED_TOTAL_MINUTES = 120
 
 
 class DropArea(QLabel):
@@ -146,10 +144,13 @@ class MainWindow(QMainWindow):
         add_files_btn.clicked.connect(self.choose_files)
         add_folder_btn = QPushButton("添加文件夹")
         add_folder_btn.clicked.connect(self.choose_folder)
+        remove_selected_btn = QPushButton("删除选中")
+        remove_selected_btn.clicked.connect(self.remove_selected_jobs)
         clear_btn = QPushButton("清空列表")
         clear_btn.clicked.connect(self.clear_jobs)
         button_row.addWidget(add_files_btn)
         button_row.addWidget(add_folder_btn)
+        button_row.addWidget(remove_selected_btn)
         button_row.addStretch()
         button_row.addWidget(clear_btn)
         layout.addLayout(button_row)
@@ -171,6 +172,12 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         self.start_button = QPushButton("转换 MP4")
         self.start_button.clicked.connect(self.start_conversion)
+        self.start_button.setStyleSheet(
+            "QPushButton { background-color: #0b6cfb; color: white; font-weight: 600; "
+            "border-radius: 6px; padding: 8px 18px; }"
+            "QPushButton:hover { background-color: #0959cc; }"
+            "QPushButton:disabled { background-color: #9fbbe9; color: #f3f6ff; }"
+        )
         action_row.addWidget(self.start_button)
         action_row.addStretch()
         layout.addLayout(action_row)
@@ -241,6 +248,22 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("进度: 0/0")
         self.log("已清空列表。")
 
+    def remove_selected_jobs(self) -> None:
+        if self.worker and self.worker.isRunning():
+            return
+        ranges = self.table.selectedRanges()
+        if not ranges:
+            return
+        rows: set[int] = set()
+        for selected in ranges:
+            for row in range(selected.topRow(), selected.bottomRow() + 1):
+                rows.add(row)
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(self.jobs):
+                self.jobs.pop(row)
+                self.table.removeRow(row)
+        self.log(f"已删除 {len(rows)} 个文件。")
+
     def start_conversion(self) -> None:
         if self.worker and self.worker.isRunning():
             return
@@ -253,8 +276,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "错误", f"无法找到 FFmpeg:\n{exc}")
             return
-        if not self._confirm_total_duration_limit():
-            return
+        self.log("时长提示: 本次任务时长未知，已直接开始转换（可随时中断）。")
 
         self.start_button.setEnabled(False)
         self._set_inputs_enabled(False)
@@ -371,35 +393,6 @@ class MainWindow(QMainWindow):
         if open_btn is not None and box.clickedButton() is open_btn:
             folder = self.output_dirs[0]
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-
-    def _confirm_total_duration_limit(self) -> bool:
-        ffmpeg = resolve_ffmpeg()
-        total_seconds = 0.0
-        unknown_count = 0
-        for job in self.jobs:
-            dur = estimate_job_duration_seconds(job, ffmpeg_path=ffmpeg)
-            if dur is None:
-                unknown_count += 1
-                continue
-            total_seconds += dur
-
-        total_minutes = int(total_seconds / 60)
-        if total_minutes <= MAX_RECOMMENDED_TOTAL_MINUTES and unknown_count == 0:
-            return True
-
-        msg = (
-            f"本次任务估算总时长约 {total_minutes} 分钟"
-            if total_seconds > 0
-            else "无法准确估算本次任务总时长"
-        )
-        if unknown_count > 0:
-            msg += f"\n有 {unknown_count} 个文件无法预估时长。"
-        msg += (
-            f"\n建议单次不超过 {MAX_RECOMMENDED_TOTAL_MINUTES} 分钟。"
-            "\n是否仍继续转换？"
-        )
-        choice = QMessageBox.question(self, "时长提醒", msg)
-        return choice == QMessageBox.StandardButton.Yes
 
 
 def run_gui() -> int:
