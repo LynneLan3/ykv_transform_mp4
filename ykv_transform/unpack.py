@@ -44,6 +44,9 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
     input_path = input_path.resolve()
     if not input_path.is_file():
         raise UnpackError(f"输入文件不存在: {input_path}")
+    file_size = input_path.stat().st_size
+    if file_size < 16:
+        raise UnpackError("输入文件过小，无法读取 YKV 尾部索引")
 
     suffix = input_path.suffix.lower()
     if suffix not in {".ykv", ".kux"}:
@@ -57,10 +60,17 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
         json_size = int(size_info.split("\x00")[0].strip())
     except (UnicodeDecodeError, ValueError) as exc:
         raise UnpackError("无法解析 YKV 尾部索引长度") from exc
+    if json_size <= 0:
+        raise UnpackError("YKV 尾部索引长度无效")
+    if json_size > file_size - 16:
+        raise UnpackError("YKV 尾部索引长度越界")
 
-    with input_path.open("rb") as packed_file:
-        packed_file.seek(-(16 + json_size), 2)
-        json_data = packed_file.read(json_size)
+    try:
+        with input_path.open("rb") as packed_file:
+            packed_file.seek(-(16 + json_size), 2)
+            json_data = packed_file.read(json_size)
+    except OSError as exc:
+        raise UnpackError("读取 YKV 尾部索引失败") from exc
 
     try:
         decoded_json = unquote(json_data.decode("utf-8"))
@@ -77,29 +87,43 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
     segment_ext = ""
     segment_index = 0
 
-    with input_path.open("rb") as packed_file:
-        for file_info in files_info:
-            filename = file_info.get("name")
-            if filename == "dbInfo":
-                continue
+    try:
+        with input_path.open("rb") as packed_file:
+            for file_info in files_info:
+                filename = file_info.get("name")
+                if filename == "dbInfo":
+                    continue
 
-            try:
-                offset = file_info["offset"]
-                size = file_info["size"]
-            except KeyError as exc:
-                raise UnpackError("YKV 分片索引缺少 offset 或 size") from exc
+                try:
+                    offset = file_info["offset"]
+                    size = file_info["size"]
+                except KeyError as exc:
+                    raise UnpackError("YKV 分片索引缺少 offset 或 size") from exc
 
-            packed_file.seek(offset)
-            content = packed_file.read(size)
+                if not isinstance(offset, int) or not isinstance(size, int):
+                    raise UnpackError("YKV 分片索引 offset/size 类型无效")
+                if offset < 0 or size <= 0:
+                    raise UnpackError("YKV 分片索引 offset/size 数值无效")
+                if offset + size > file_size:
+                    raise UnpackError("YKV 分片索引越界")
 
-            if content[:2] == b"YK":
-                content = content[34:]
+                packed_file.seek(offset)
+                content = packed_file.read(size)
+                if len(content) != size:
+                    raise UnpackError("YKV 分片读取不完整")
 
-            segment_index += 1
-            segment_ext = filename.rsplit(".", 1)[-1]
-            output_file = temp_dir / f"{segment_index}.{segment_ext}"
-            output_file.write_bytes(content)
-            segments.append(output_file)
+                if content[:2] == b"YK":
+                    if len(content) < 34:
+                        raise UnpackError("YKV 分片头部长度异常")
+                    content = content[34:]
+
+                segment_index += 1
+                segment_ext = filename.rsplit(".", 1)[-1]
+                output_file = temp_dir / f"{segment_index}.{segment_ext}"
+                output_file.write_bytes(content)
+                segments.append(output_file)
+    except OSError as exc:
+        raise UnpackError("读取 YKV 分片失败") from exc
 
     if not segments:
         raise UnpackError("未从 YKV 文件中提取到任何视频分片")

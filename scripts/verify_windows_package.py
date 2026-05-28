@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,19 +31,23 @@ def check_files() -> None:
 def check_service() -> None:
     from ykv_transform.service import JobItem, collect_jobs, convert_job
 
-    sample = Path("/tmp/sample.ykv")
-    if not sample.is_file():
-        raise SystemExit("Run scripts/create_test_ykv.py first to generate /tmp/sample.ykv")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        sample = temp / "sample.ykv"
+        output = temp / "verify_gui_logic.mp4"
+        create_script = PROJECT_ROOT / "scripts" / "create_test_ykv.py"
+        # Build a disposable sample to avoid relying on host-specific /tmp state.
+        subprocess.run([sys.executable, str(create_script), str(sample)], check=True)
 
-    jobs = collect_jobs([sample])
-    assert len(jobs) == 1
-    result = convert_job(
-        JobItem(jobs[0].input_path, Path("/tmp/verify_gui_logic.mp4")),
-        mode="karaoke",
-        force=True,
-    )
-    if not result.success:
-        raise SystemExit(result.message)
+        jobs = collect_jobs([sample])
+        assert len(jobs) == 1
+        result = convert_job(
+            JobItem(jobs[0].input_path, output),
+            mode="karaoke",
+            force=True,
+        )
+        if not result.success:
+            raise SystemExit(result.message)
 
 
 def check_gui_import() -> None:

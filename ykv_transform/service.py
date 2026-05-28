@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ykv_transform.convert import ConvertError, merge_segments
-from ykv_transform.resources import SUPPORTED_EXTENSIONS, bundled_ffmpeg
+from ykv_transform.convert import ConvertError, find_ffmpeg, merge_segments
+from ykv_transform.resources import SUPPORTED_EXTENSIONS
 from ykv_transform.unpack import UnpackError, unpack_ykv
 
 EXIT_OK = 0
@@ -44,20 +43,7 @@ class BatchSummary:
 
 
 def resolve_ffmpeg(explicit_path: str | None = None) -> str:
-    if explicit_path:
-        path = Path(explicit_path)
-        if not path.is_file():
-            raise ConvertError(f"指定的 ffmpeg 不存在: {explicit_path}")
-        return str(path)
-
-    bundled = bundled_ffmpeg()
-    if bundled is not None:
-        return str(bundled)
-
-    found = shutil.which("ffmpeg")
-    if not found:
-        raise ConvertError("未找到 ffmpeg，请先安装并加入 PATH")
-    return found
+    return find_ffmpeg(explicit_path)
 
 
 def is_supported_input(path: Path) -> bool:
@@ -161,6 +147,14 @@ def convert_job(
             output_path=None,
             success=False,
             message=f"转换失败: {exc}",
+            exit_code=EXIT_CONVERT,
+        )
+    except Exception as exc:
+        return JobResult(
+            input_path=item.input_path,
+            output_path=None,
+            success=False,
+            message=f"处理失败: {exc}",
             exit_code=EXIT_CONVERT,
         )
     finally:

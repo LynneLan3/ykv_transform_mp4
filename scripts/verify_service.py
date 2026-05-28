@@ -11,6 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from ykv_transform.convert import find_ffprobe
 from ykv_transform.service import JobItem, collect_jobs, convert_job
 
 
@@ -37,7 +38,7 @@ def main() -> int:
             return 1
 
         probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_streams", str(output)],
+            [find_ffprobe(), "-v", "quiet", "-show_streams", str(output)],
             capture_output=True,
             text=True,
             check=False,
