@@ -70,7 +70,16 @@ function Build-Installer {
 
     $issPath = Join-Path $PSScriptRoot "installer.iss"
     & $iscc $issPath
-    Write-Host "Installer created under dist\installer"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Inno Setup compile failed with exit code $LASTEXITCODE"
+    }
+
+    $installerExe = Join-Path $ProjectRoot "dist\installer\YKVTransform-Setup-x64.exe"
+    if (-not (Test-Path $installerExe)) {
+        throw "Installer not found at $installerExe"
+    }
+
+    Write-Host "Installer created: $installerExe"
 }
 
 Ensure-Ffmpeg
