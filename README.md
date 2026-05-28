@@ -96,6 +96,15 @@ python gui_main.py
 
 也可推送代码到 `main` 分支，由 GitHub Actions（`.github/workflows/build-windows.yml`）自动构建并上传产物。
 
+### 推荐发布前流程（先本地预检，再推送构建）
+
+```bash
+# 一条命令跑完关键回归（失败即退出）
+python3 scripts/preflight_local.py
+```
+
+通过后再推送分支并触发 Windows 构建，可显著减少“推送后才发现不能转换”的往返。
+
 ### FFmpeg 许可证
 
 Windows 安装包内置的 FFmpeg 来自 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)（GPL 构建）。分发时需遵守 GPL 要求；构建脚本会尝试复制 `LICENSE` 到 `resources/ffmpeg/win64/FFmpeg_LICENSE.txt`。
@@ -147,6 +156,7 @@ python3 scripts/verify_service.py
 python3 main.py convert /tmp/sample.ykv -o /tmp/out_copy.mp4 --mode copy
 python3 main.py convert /tmp/sample.ykv -o /tmp/out_karaoke.mp4 --mode karaoke
 ffprobe -show_streams /tmp/out_copy.mp4
+python3 scripts/preflight_local.py
 ```
 
 GUI 开发环境验证：

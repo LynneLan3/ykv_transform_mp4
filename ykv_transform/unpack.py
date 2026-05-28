@@ -17,6 +17,17 @@ class UnpackResult:
     vip_warning: str | None = None
 
 
+SKIP_INDEX_EXTENSIONS = {
+    "m3u8",
+    "txt",
+    "json",
+    "xml",
+    "cfg",
+    "ini",
+    "db",
+}
+
+
 def _read_last_bytes(input_file: Path, num_bytes: int) -> bytes:
     with input_file.open("rb") as handle:
         handle.seek(-num_bytes, 2)
@@ -94,6 +105,14 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
             filename = file_info.get("name")
             if filename == "dbInfo":
                 continue
+            name = str(filename or "")
+            lowered = name.lower()
+            if "." in lowered:
+                ext = lowered.rsplit(".", 1)[-1]
+                if ext in SKIP_INDEX_EXTENSIONS:
+                    # Skip text/index artifacts (e.g. m3u8 playlist) to avoid
+                    # feeding non-media files into FFmpeg concat/filter inputs.
+                    continue
 
             try:
                 offset = file_info["offset"]
@@ -112,7 +131,7 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
             if key in seen_ranges:
                 continue
             seen_ranges.add(key)
-            media_entries.append({"name": filename, "offset": offset, "size": size})
+            media_entries.append({"name": name, "offset": offset, "size": size})
 
         media_entries.sort(key=lambda item: item["offset"])
 
