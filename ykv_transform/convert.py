@@ -16,6 +16,13 @@ class ConvertError(Exception):
 SUPPORTED_MODES = {"copy", "karaoke"}
 
 
+def _subprocess_kwargs() -> dict:
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
+
+
 def _ffprobe_sibling(ffmpeg_path: Path) -> Path | None:
     for name in ("ffprobe", "ffprobe.exe"):
         candidate = ffmpeg_path.parent / name
@@ -128,6 +135,7 @@ def probe_output(output_path: Path, ffprobe_path: str | None = None) -> dict:
         capture_output=True,
         text=True,
         check=False,
+        **_subprocess_kwargs(),
     )
     if result.returncode != 0:
         raise ConvertError(result.stderr.strip() or "ffprobe 校验失败")
@@ -163,7 +171,13 @@ def merge_segments(
     _write_concat_list(segments, concat_list)
 
     args = _build_ffmpeg_args(ffmpeg, concat_list, output_path, mode)
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        check=False,
+        **_subprocess_kwargs(),
+    )
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or "FFmpeg 合并失败"
         raise ConvertError(message)

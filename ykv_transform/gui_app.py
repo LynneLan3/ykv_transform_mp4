@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -97,6 +98,10 @@ class MainWindow(QMainWindow):
         self.resize(960, 680)
         self.jobs: list[JobItem] = []
         self.worker: ConvertWorker | None = None
+        self.completed_count = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.skipped_count = 0
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -150,6 +155,15 @@ class MainWindow(QMainWindow):
         action_row.addStretch()
         layout.addLayout(action_row)
 
+        self.progress_label = QLabel("进度: 0/0")
+        layout.addWidget(self.progress_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%v / %m")
+        layout.addWidget(self.progress_bar)
+
         layout.addWidget(QLabel("日志"))
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
@@ -202,6 +216,9 @@ class MainWindow(QMainWindow):
             return
         self.jobs.clear()
         self.table.setRowCount(0)
+        self.progress_bar.setMaximum(1)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("进度: 0/0")
         self.log("已清空列表。")
 
     def start_conversion(self) -> None:
@@ -218,6 +235,14 @@ class MainWindow(QMainWindow):
             return
 
         self.start_button.setEnabled(False)
+        self._set_inputs_enabled(False)
+        self.completed_count = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.skipped_count = 0
+        self.progress_bar.setMaximum(len(self.jobs))
+        self.progress_bar.setValue(0)
+        self.progress_label.setText(f"进度: 0/{len(self.jobs)}")
         self.log("开始转换...")
         mode = self.mode_combo.currentData()
         self.worker = ConvertWorker(self.jobs, mode, self.force_checkbox.isChecked(), self)
@@ -228,20 +253,44 @@ class MainWindow(QMainWindow):
     def on_progress(self, index: int, status: str, result: JobResult | None) -> None:
         self.table.item(index, 2).setText(status)
         if result is None:
+            self.log(f"正在处理: {self.jobs[index].input_path.name}")
             return
+
+        self.completed_count += 1
+        self.progress_bar.setValue(self.completed_count)
+        self.progress_label.setText(f"进度: {self.completed_count}/{len(self.jobs)}")
 
         if result.vip_warning:
             self.log(f"警告 [{result.input_path.name}]: {result.vip_warning}")
         if result.success:
+            if status == STATUS_SKIPPED:
+                self.skipped_count += 1
+            else:
+                self.success_count += 1
             self.log(result.message)
             if result.compatibility_hint:
                 self.log(result.compatibility_hint)
         else:
+            self.failed_count += 1
             self.log(result.message)
 
     def on_finished(self) -> None:
         self.start_button.setEnabled(True)
+        self._set_inputs_enabled(True)
         self.log("全部任务完成。")
+        summary = (
+            f"成功 {self.success_count} 个，跳过 {self.skipped_count} 个，失败 {self.failed_count} 个。"
+        )
+        self.log(f"结果汇总: {summary}")
+        if self.failed_count > 0:
+            QMessageBox.warning(self, "转换完成（有失败）", f"{summary}\n请查看日志中的失败原因。")
+        else:
+            QMessageBox.information(self, "转换完成", summary)
+
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        self.drop_area.setEnabled(enabled)
+        self.mode_combo.setEnabled(enabled)
+        self.force_checkbox.setEnabled(enabled)
 
 
 def run_gui() -> int:
