@@ -86,30 +86,41 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
     segments: list[Path] = []
     segment_ext = ""
     segment_index = 0
+    media_entries: list[dict] = []
+    seen_ranges: set[tuple[int, int]] = set()
 
     try:
+        for file_info in files_info:
+            filename = file_info.get("name")
+            if filename == "dbInfo":
+                continue
+
+            try:
+                offset = file_info["offset"]
+                size = file_info["size"]
+            except KeyError as exc:
+                raise UnpackError("YKV 分片索引缺少 offset 或 size") from exc
+
+            if not isinstance(offset, int) or not isinstance(size, int):
+                raise UnpackError("YKV 分片索引 offset/size 类型无效")
+            if offset < 0 or size <= 0:
+                raise UnpackError("YKV 分片索引 offset/size 数值无效")
+            if offset + size > file_size:
+                raise UnpackError("YKV 分片索引越界")
+
+            key = (offset, size)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            media_entries.append({"name": filename, "offset": offset, "size": size})
+
+        media_entries.sort(key=lambda item: item["offset"])
+
         with input_path.open("rb") as packed_file:
-            for file_info in files_info:
-                filename = file_info.get("name")
-                if filename == "dbInfo":
-                    continue
-
-                try:
-                    offset = file_info["offset"]
-                    size = file_info["size"]
-                except KeyError as exc:
-                    raise UnpackError("YKV 分片索引缺少 offset 或 size") from exc
-
-                if not isinstance(offset, int) or not isinstance(size, int):
-                    raise UnpackError("YKV 分片索引 offset/size 类型无效")
-                if offset < 0 or size <= 0:
-                    raise UnpackError("YKV 分片索引 offset/size 数值无效")
-                if offset + size > file_size:
-                    raise UnpackError("YKV 分片索引越界")
-
-                packed_file.seek(offset)
-                content = packed_file.read(size)
-                if len(content) != size:
+            for entry in media_entries:
+                packed_file.seek(entry["offset"])
+                content = packed_file.read(entry["size"])
+                if len(content) != entry["size"]:
                     raise UnpackError("YKV 分片读取不完整")
 
                 if content[:2] == b"YK":
@@ -118,7 +129,11 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
                     content = content[34:]
 
                 segment_index += 1
-                segment_ext = filename.rsplit(".", 1)[-1]
+                name = str(entry["name"] or "")
+                if "." in name:
+                    segment_ext = name.rsplit(".", 1)[-1]
+                else:
+                    segment_ext = "mp4"
                 output_file = temp_dir / f"{segment_index}.{segment_ext}"
                 output_file.write_bytes(content)
                 segments.append(output_file)

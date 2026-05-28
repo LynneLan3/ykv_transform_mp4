@@ -120,6 +120,49 @@ def _build_ffmpeg_args(
     return args
 
 
+def _build_karaoke_filter_args(
+    ffmpeg_path: str,
+    segments: list[Path],
+    output_path: Path,
+) -> list[str]:
+    args = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+    for segment in segments:
+        args.extend(["-i", str(segment)])
+
+    concat_inputs = "".join(f"[{idx}:v:0][{idx}:a:0]" for idx in range(len(segments)))
+    filter_graph = f"{concat_inputs}concat=n={len(segments)}:v=1:a=1[v][a]"
+    args.extend(
+        [
+            "-filter_complex",
+            filter_graph,
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "main",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(output_path),
+        ]
+    )
+    return args
+
+
 def probe_output(output_path: Path, ffprobe_path: str | None = None) -> dict:
     ffprobe = ffprobe_path or find_ffprobe()
     result = subprocess.run(
@@ -160,17 +203,21 @@ def merge_segments(
 ) -> dict:
     if mode not in SUPPORTED_MODES:
         raise ConvertError(f"不支持的输出模式: {mode}")
+    if not segments:
+        raise ConvertError("没有可合并的分片")
 
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = find_ffprobe(ffmpeg)
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    work_dir = temp_dir or output_path.parent
-    concat_list = work_dir / "concat_list.txt"
-    _write_concat_list(segments, concat_list)
-
-    args = _build_ffmpeg_args(ffmpeg, concat_list, output_path, mode)
+    if mode == "karaoke":
+        args = _build_karaoke_filter_args(ffmpeg, segments, output_path)
+    else:
+        work_dir = temp_dir or output_path.parent
+        concat_list = work_dir / "concat_list.txt"
+        _write_concat_list(segments, concat_list)
+        args = _build_ffmpeg_args(ffmpeg, concat_list, output_path, mode)
     result = subprocess.run(
         args,
         capture_output=True,
