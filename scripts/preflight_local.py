@@ -13,7 +13,7 @@ from urllib.parse import quote
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ykv_transform.convert import find_ffmpeg, probe_output
+from ykv_transform.convert import find_ffmpeg, find_ffprobe, probe_output
 from ykv_transform.service import JobItem, convert_job
 from ykv_transform.unpack import unpack_ykv
 
@@ -87,6 +87,48 @@ def assert_probe_ok(mp4_path: Path) -> None:
         raise RuntimeError(f"missing streams in output: {mp4_path}")
 
 
+def assert_video_dts_continuity(mp4_path: Path, max_gap: float = 0.08) -> None:
+    ffprobe = find_ffprobe()
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_entries",
+            "packet=dts_time",
+            "-of",
+            "csv=p=0",
+            str(mp4_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe packets failed: {result.stderr.strip()}")
+    dts_list: list[float] = []
+    for raw in result.stdout.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            dts_list.append(float(raw))
+        except ValueError:
+            continue
+    if len(dts_list) < 3:
+        raise RuntimeError("insufficient video packets for dts continuity check")
+    for i in range(1, len(dts_list)):
+        delta = dts_list[i] - dts_list[i - 1]
+        if delta > max_gap:
+            raise RuntimeError(
+                f"video dts discontinuity detected at packet {i}: "
+                f"{dts_list[i-1]:.6f} -> {dts_list[i]:.6f} (gap={delta:.6f}s)"
+            )
+
+
 def preflight_basic_conversion(temp_root: Path) -> None:
     sample = temp_root / "sample_basic.ykv"
     run_cmd([sys.executable, str(PROJECT_ROOT / "scripts/create_test_ykv.py"), str(sample)], "create test ykv")
@@ -101,6 +143,7 @@ def preflight_basic_conversion(temp_root: Path) -> None:
         raise RuntimeError(f"karaoke mode failed: {karaoke_result.message}")
     assert_probe_ok(out_copy)
     assert_probe_ok(out_karaoke)
+    assert_video_dts_continuity(out_karaoke)
 
 
 def preflight_m3u8_noise_case(temp_root: Path) -> None:
@@ -134,6 +177,38 @@ def preflight_m3u8_noise_case(temp_root: Path) -> None:
     if not result.success:
         raise RuntimeError(f"m3u8-noise case failed: {result.message}")
     assert_probe_ok(out_karaoke)
+    assert_video_dts_continuity(out_karaoke)
+
+
+def preflight_playlist_order_case(temp_root: Path) -> None:
+    first = temp_root / "order_first.mp4"
+    second = temp_root / "order_second.mp4"
+    create_sample_mp4(first, tone=440)
+    create_sample_mp4(second, tone=880)
+
+    # Playlist requires "second -> first", regardless of physical offset order.
+    playlist = b"#EXTM3U\n#EXTINF:1.0,\n2.mp4\n#EXTINF:1.0,\n1.mp4\n"
+    sample = temp_root / "sample_playlist_order.ykv"
+    build_ykv(
+        [
+            {"name": "1.mp4", "content": first.read_bytes()},
+            {"name": "2.mp4", "content": second.read_bytes()},
+            {"name": "index.m3u8", "content": playlist},
+        ],
+        sample,
+    )
+
+    unpack_dir = temp_root / "order_unpack"
+    unpack_result = unpack_ykv(sample, unpack_dir)
+    if len(unpack_result.segments) < 2:
+        raise RuntimeError("playlist-order case did not produce expected segments")
+
+    first_extracted = unpack_result.segments[0].read_bytes()
+    second_extracted = unpack_result.segments[1].read_bytes()
+    if not first_extracted.startswith(second.read_bytes()[:64]):
+        raise RuntimeError("playlist order mismatch: first extracted segment is not 2.mp4")
+    if not second_extracted.startswith(first.read_bytes()[:64]):
+        raise RuntimeError("playlist order mismatch: second extracted segment is not 1.mp4")
 
 
 def preflight_existing_scripts() -> None:
@@ -152,6 +227,8 @@ def main() -> int:
         preflight_basic_conversion(temp_root)
         print("[preflight] running m3u8-noise regression check...")
         preflight_m3u8_noise_case(temp_root)
+        print("[preflight] running playlist-order regression check...")
+        preflight_playlist_order_case(temp_root)
 
     print("[preflight] running existing verification scripts...")
     preflight_existing_scripts()

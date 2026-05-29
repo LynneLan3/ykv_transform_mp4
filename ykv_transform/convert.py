@@ -136,8 +136,18 @@ def _build_karaoke_filter_args(
     for segment in segments:
         args.extend(["-i", str(segment)])
 
-    concat_inputs = "".join(f"[{idx}:v:0][{idx}:a:0]" for idx in range(len(segments)))
-    filter_graph = f"{concat_inputs}concat=n={len(segments)}:v=1:a=1[v][a]"
+    graph_parts: list[str] = []
+    concat_inputs: list[str] = []
+    for idx in range(len(segments)):
+        graph_parts.append(f"[{idx}:v:0]setpts=PTS-STARTPTS,fps=25[v{idx}]")
+        graph_parts.append(
+            f"[{idx}:a:0]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[a{idx}]"
+        )
+        concat_inputs.append(f"[v{idx}][a{idx}]")
+    graph_parts.append(
+        f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=1[v][a]"
+    )
+    filter_graph = ";".join(graph_parts)
     args.extend(
         [
             "-filter_complex",
@@ -156,6 +166,8 @@ def _build_karaoke_filter_args(
             "aac",
             "-b:a",
             "192k",
+            "-r",
+            "25",
             "-movflags",
             "+faststart",
             "-y",
@@ -163,6 +175,39 @@ def _build_karaoke_filter_args(
         ]
     )
     return args
+
+
+def _validate_segment_decoding(
+    ffmpeg_path: str,
+    segments: list[Path],
+) -> None:
+    for index, segment in enumerate(segments, start=1):
+        result = subprocess.run(
+            [
+                ffmpeg_path,
+                "-v",
+                "error",
+                "-xerror",
+                "-i",
+                str(segment),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            **_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "无法解码分片"
+            raise ConvertError(
+                f"第 {index} 段音视频分片不可解码（可能损坏或受保护）: {detail}"
+            )
 
 
 def _estimate_total_duration_seconds(segments: list[Path], ffprobe_path: str) -> float | None:
@@ -299,6 +344,7 @@ def merge_segments(
     ffprobe = find_ffprobe(ffmpeg)
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_segment_decoding(ffmpeg, segments)
 
     if mode == "karaoke":
         args = _build_karaoke_filter_args(ffmpeg, segments, output_path)
@@ -309,7 +355,7 @@ def merge_segments(
         args = _build_ffmpeg_args(ffmpeg, concat_list, output_path, mode)
     duration_seconds = _estimate_total_duration_seconds(segments, ffprobe)
     if progress_callback is not None:
-        progress_callback(5)
+        progress_callback(10)
     returncode, ffmpeg_message = _run_ffmpeg_with_progress(
         args,
         duration_seconds=duration_seconds,

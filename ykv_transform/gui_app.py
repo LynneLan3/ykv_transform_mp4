@@ -65,7 +65,7 @@ class DropArea(QLabel):
 
 class ConvertWorker(QThread):
     progress = Signal(int, str, object, int)
-    finished_all = Signal()
+    finished_all = Signal(object)
 
     def __init__(
         self,
@@ -86,9 +86,16 @@ class ConvertWorker(QThread):
 
     def run(self) -> None:
         total = max(len(self.jobs), 1)
+        counts = {
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "cancelled": 0,
+        }
         for index, job in enumerate(self.jobs):
             if self._cancel_event.is_set():
                 self.progress.emit(index, STATUS_CANCELLED, None, int((index / total) * 100))
+                counts["cancelled"] += 1
                 break
             self.progress.emit(index, STATUS_RUNNING, None, int((index / total) * 100))
 
@@ -109,11 +116,19 @@ class ConvertWorker(QThread):
                 status = STATUS_SKIPPED
             if not result.success and "用户已取消转换" in result.message:
                 status = STATUS_CANCELLED
+            if status == STATUS_SUCCESS:
+                counts["success"] += 1
+            elif status == STATUS_SKIPPED:
+                counts["skipped"] += 1
+            elif status == STATUS_CANCELLED:
+                counts["cancelled"] += 1
+            else:
+                counts["failed"] += 1
             done_percent = int(((index + 1) / total) * 100)
             self.progress.emit(index, status, result, done_percent)
             if status == STATUS_CANCELLED:
                 break
-        self.finished_all.emit()
+        self.finished_all.emit(counts)
 
 
 class MainWindow(QMainWindow):
@@ -290,6 +305,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_label.setText(f"进度: 0/{len(self.jobs)}")
         self._create_progress_dialog()
+        self.log("诊断: 检测到边界重建模式（25fps）。")
         self.log("开始转换...")
         self.worker = ConvertWorker(self.jobs, "karaoke", True, self)
         self.worker.progress.connect(self.on_progress)
@@ -329,10 +345,13 @@ class MainWindow(QMainWindow):
         if status == STATUS_CANCELLED:
             self.log("用户已中断转换。")
 
-    def on_finished(self) -> None:
+    def on_finished(self, counts: dict[str, int]) -> None:
         self.start_button.setEnabled(True)
         self._set_inputs_enabled(True)
         self._close_progress_dialog()
+        self.success_count = counts.get("success", self.success_count)
+        self.skipped_count = counts.get("skipped", self.skipped_count)
+        self.failed_count = counts.get("failed", self.failed_count)
         self.log("全部任务完成。")
         summary = (
             f"成功 {self.success_count} 个，跳过 {self.skipped_count} 个，失败 {self.failed_count} 个。"

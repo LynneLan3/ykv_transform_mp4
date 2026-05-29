@@ -51,6 +51,25 @@ def _check_vip_warning(files_info: list[dict]) -> str | None:
     return None
 
 
+def _basename_lower(name: str) -> str:
+    normalized = name.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1].lower()
+
+
+def _parse_m3u8_sequence(raw: bytes) -> list[str]:
+    try:
+        text = raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    sequence: list[str] = []
+    for line in text.splitlines():
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        sequence.append(_basename_lower(item))
+    return sequence
+
+
 def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
     input_path = input_path.resolve()
     if not input_path.is_file():
@@ -99,6 +118,7 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
     segment_index = 0
     media_entries: list[dict] = []
     seen_ranges: set[tuple[int, int]] = set()
+    playlist_order: list[str] = []
 
     try:
         for file_info in files_info:
@@ -110,6 +130,15 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
             if "." in lowered:
                 ext = lowered.rsplit(".", 1)[-1]
                 if ext in SKIP_INDEX_EXTENSIONS:
+                    if ext == "m3u8":
+                        try:
+                            with input_path.open("rb") as packed_file:
+                                packed_file.seek(file_info["offset"])
+                                m3u8_raw = packed_file.read(file_info["size"])
+                            playlist_order.extend(_parse_m3u8_sequence(m3u8_raw))
+                        except Exception:
+                            # Do not fail conversion only because playlist parsing failed.
+                            pass
                     # Skip text/index artifacts (e.g. m3u8 playlist) to avoid
                     # feeding non-media files into FFmpeg concat/filter inputs.
                     continue
@@ -133,7 +162,30 @@ def unpack_ykv(input_path: Path, temp_dir: Path) -> UnpackResult:
             seen_ranges.add(key)
             media_entries.append({"name": name, "offset": offset, "size": size})
 
-        media_entries.sort(key=lambda item: item["offset"])
+        if playlist_order:
+            by_basename: dict[str, list[dict]] = {}
+            for entry in media_entries:
+                key = _basename_lower(entry["name"])
+                by_basename.setdefault(key, []).append(entry)
+
+            ordered: list[dict] = []
+            used_ids: set[int] = set()
+            for base in playlist_order:
+                candidates = by_basename.get(base, [])
+                for candidate in candidates:
+                    cid = id(candidate)
+                    if cid in used_ids:
+                        continue
+                    ordered.append(candidate)
+                    used_ids.add(cid)
+                    break
+
+            # Keep unmatched entries as fallback to avoid dropping media data.
+            remaining = [entry for entry in media_entries if id(entry) not in used_ids]
+            remaining.sort(key=lambda item: item["offset"])
+            media_entries = ordered + remaining
+        else:
+            media_entries.sort(key=lambda item: item["offset"])
 
         with input_path.open("rb") as packed_file:
             for entry in media_entries:
