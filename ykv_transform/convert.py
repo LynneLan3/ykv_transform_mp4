@@ -128,7 +128,7 @@ def _build_ffmpeg_args(
 
 def _build_karaoke_filter_args(
     ffmpeg_path: str,
-    segments: list[Path],
+    concat_list: Path,
     output_path: Path,
 ) -> list[str]:
     args = [
@@ -136,30 +136,20 @@ def _build_karaoke_filter_args(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
     ]
-    for segment in segments:
-        args.extend(["-i", str(segment)])
 
-    graph_parts: list[str] = []
-    concat_inputs: list[str] = []
-    for idx in range(len(segments)):
-        graph_parts.append(f"[{idx}:v:0]setpts=PTS-STARTPTS,fps=25[v{idx}]")
-        graph_parts.append(
-            f"[{idx}:a:0]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0[a{idx}]"
-        )
-        concat_inputs.append(f"[v{idx}][a{idx}]")
-    graph_parts.append(
-        f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=1[v][a]"
-    )
-    filter_graph = ";".join(graph_parts)
     args.extend(
         [
-            "-filter_complex",
-            filter_graph,
-            "-map",
-            "[v]",
-            "-map",
-            "[a]",
+            "-vf",
+            "setpts=PTS-STARTPTS,fps=25",
+            "-af",
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
             "-c:v",
             "libx264",
             "-profile:v",
@@ -363,7 +353,10 @@ def merge_segments(
     _validate_segment_decoding(ffmpeg, segments)
 
     if mode == "karaoke":
-        args = _build_karaoke_filter_args(ffmpeg, segments, output_path)
+        work_dir = temp_dir or output_path.parent
+        concat_list = work_dir / "concat_list.txt"
+        _write_concat_list(segments, concat_list)
+        args = _build_karaoke_filter_args(ffmpeg, concat_list, output_path)
     else:
         work_dir = temp_dir or output_path.parent
         concat_list = work_dir / "concat_list.txt"
