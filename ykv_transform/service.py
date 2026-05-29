@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ class JobResult:
     message: str
     vip_warning: str | None = None
     compatibility_hint: str | None = None
+    error_detail: str | None = None
     exit_code: int = EXIT_OK
 
 
@@ -154,6 +156,7 @@ def convert_job(
             output_path=None,
             success=False,
             message=f"解包失败: {exc}",
+            error_detail=f"[stage=unpack] input={item.input_path}",
             exit_code=EXIT_UNPACK,
         )
     except ConvertError as exc:
@@ -162,6 +165,7 @@ def convert_job(
             output_path=None,
             success=False,
             message=f"转换失败: {exc}",
+            error_detail=f"[stage=convert] input={item.input_path}",
             exit_code=EXIT_CONVERT,
         )
     except Exception as exc:
@@ -170,6 +174,7 @@ def convert_job(
             output_path=None,
             success=False,
             message=f"处理失败: {exc}",
+            error_detail=traceback.format_exc(),
             exit_code=EXIT_CONVERT,
         )
     finally:

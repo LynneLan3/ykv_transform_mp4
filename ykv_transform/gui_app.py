@@ -207,6 +207,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress_bar)
 
         layout.addWidget(QLabel("日志"))
+        log_action_row = QHBoxLayout()
+        self.copy_log_button = QPushButton("复制详细日志")
+        self.copy_log_button.clicked.connect(self.copy_logs_to_clipboard)
+        log_action_row.addWidget(self.copy_log_button)
+        log_action_row.addStretch()
+        layout.addLayout(log_action_row)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view)
@@ -342,6 +348,9 @@ class MainWindow(QMainWindow):
         else:
             self.failed_count += 1
             self.log(result.message)
+            if result.error_detail:
+                self.log("详细错误:")
+                self.log(result.error_detail)
         if status == STATUS_CANCELLED:
             self.log("用户已中断转换。")
 
@@ -412,6 +421,17 @@ class MainWindow(QMainWindow):
         if open_btn is not None and box.clickedButton() is open_btn:
             folder = self.output_dirs[0]
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def copy_logs_to_clipboard(self) -> None:
+        text = self.log_view.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "提示", "当前没有可复制的日志内容。")
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.clipboard().setText(text)
+        QMessageBox.information(self, "提示", "详细日志已复制到剪贴板。")
 
 
 def run_gui() -> int:

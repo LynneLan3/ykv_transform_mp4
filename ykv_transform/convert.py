@@ -25,6 +25,10 @@ def _subprocess_kwargs() -> dict:
     return kwargs
 
 
+def _format_cmd(args: list[str]) -> str:
+    return " ".join(f'"{arg}"' if " " in arg else arg for arg in args)
+
+
 def _ffprobe_sibling(ffmpeg_path: Path) -> Path | None:
     for name in ("ffprobe", "ffprobe.exe"):
         candidate = ffmpeg_path.parent / name
@@ -182,22 +186,23 @@ def _validate_segment_decoding(
     segments: list[Path],
 ) -> None:
     for index, segment in enumerate(segments, start=1):
+        args = [
+            ffmpeg_path,
+            "-v",
+            "error",
+            "-xerror",
+            "-i",
+            str(segment),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-f",
+            "null",
+            "-",
+        ]
         result = subprocess.run(
-            [
-                ffmpeg_path,
-                "-v",
-                "error",
-                "-xerror",
-                "-i",
-                str(segment),
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0",
-                "-f",
-                "null",
-                "-",
-            ],
+            args,
             capture_output=True,
             text=True,
             check=False,
@@ -206,7 +211,10 @@ def _validate_segment_decoding(
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "无法解码分片"
             raise ConvertError(
-                f"第 {index} 段音视频分片不可解码（可能损坏或受保护）: {detail}"
+                f"[stage=segment-decode] index={index} returncode={result.returncode}\n"
+                f"segment={segment}\n"
+                f"cmd: {_format_cmd(args)}\n"
+                f"detail: 第 {index} 段音视频分片不可解码（可能损坏或受保护）: {detail}"
             )
 
 
@@ -291,29 +299,37 @@ def _run_ffmpeg_with_progress(
                 progress_callback(percent)
 
     stderr_text = process.stderr.read().strip()
+    stdout_tail = process.stdout.read().strip() if process.stdout else ""
     process.wait()
-    return process.returncode, stderr_text
+    payload = stderr_text or stdout_tail
+    return process.returncode, payload
 
 
 def probe_output(output_path: Path, ffprobe_path: str | None = None) -> dict:
     ffprobe = ffprobe_path or find_ffprobe()
+    args = [
+        ffprobe,
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        str(output_path),
+    ]
     result = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_streams",
-            str(output_path),
-        ],
+        args,
         capture_output=True,
         text=True,
         check=False,
         **_subprocess_kwargs(),
     )
     if result.returncode != 0:
-        raise ConvertError(result.stderr.strip() or "ffprobe 校验失败")
+        detail = result.stderr.strip() or result.stdout.strip() or "ffprobe 校验失败"
+        raise ConvertError(
+            f"[stage=probe-output] returncode={result.returncode}\n"
+            f"cmd: {_format_cmd(args)}\n"
+            f"detail: {detail}"
+        )
 
     try:
         payload = json.loads(result.stdout)
@@ -366,7 +382,11 @@ def merge_segments(
         progress_callback(95)
     if returncode != 0:
         message = ffmpeg_message or "FFmpeg 合并失败"
-        raise ConvertError(message)
+        raise ConvertError(
+            f"[stage=ffmpeg-merge] returncode={returncode}\n"
+            f"cmd: {_format_cmd(args)}\n"
+            f"detail: {message}"
+        )
 
     probe = probe_output(output_path, ffprobe)
     if progress_callback is not None:
